@@ -2,8 +2,8 @@
 // Solapi CLI for Yomates — 솔라피 문자(SMS·LMS) 연결, 잔액·발신번호 확인, 시험 발송, Firebase 비밀값 넣기.
 // 설치할 것 없음: Node.js 18 이상만 있으면 된다(외부 패키지 0개).
 //
-// API 키와 시크릿은 내 컴퓨터의 ~/.yomates-solapi/config.json 에만 저장한다(내 계정만 읽기 권한).
-// 값은 화면에 절대 출력하지 않는다. 클립보드에서 바로 읽어 저장하고, 읽은 뒤 클립보드를 비운다.
+// API 키와 시크릿은 맥이면 키체인, 윈도우면 내 계정만 풀 수 있는 암호화 파일, 리눅스면 내 계정만 읽는 파일에 둔다.
+// 값은 화면에 절대 출력하지 않는다. 클립보드에서 한 번 읽어 바로 저장하고, 읽은 뒤 클립보드를 비운다.
 //
 //   node solapi.mjs key --from-clipboard        API Key 저장
 //   node solapi.mjs secret --from-clipboard     API Secret 저장
@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { execSync, spawnSync } from "node:child_process";
 
 const API = "https://api.solapi.com";
-const DIR = join(homedir(), ".yomates-solapi");
+const DIR = process.env.YOMATES_SOLAPI_DIR || join(homedir(), ".yomates-solapi");   // 시험할 때만 바꾼다
 const FILE = join(DIR, "config.json");
 const KST = 9 * 3600000;
 
@@ -32,16 +32,72 @@ function save(c) {
   writeFileSync(FILE, JSON.stringify(c, null, 2));
   try { chmodSync(DIR, 0o700); chmodSync(FILE, 0o600); } catch {}
 }
-function clipboard() {
+// ===== 비밀값 보관 (2026-10 보안 강화) =====
+// 맥: 키체인(macOS Keychain) / 윈도우: 내 계정만 풀 수 있는 암호화(DPAPI) 파일 / 리눅스: 내 계정만 읽는 파일(600)
+// 값은 명령 인자로 넘기지 않는다(다른 프로그램의 프로세스 목록에 보일 수 있음). 표준입력으로만 넘긴다.
+const KC_SERVICE = process.env.YOMATES_KC_SERVICE || "yomates-solapi";
+function vaultSet(name, value) {
+  const os = platform();
+  if (os === "darwin") {
+    const esc = (v) => String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const r = spawnSync("security", ["-i"], { input: `add-generic-password -U -a "${esc(name)}" -s "${KC_SERVICE}" -w "${esc(value)}"\n`, encoding: "utf8" });
+    if (r.status !== 0) throw new Error("키체인에 저장하지 못했어요.");
+    return;
+  }
+  if (os === "win32") {
+    const r = spawnSync("powershell", ["-NoProfile", "-Command", "$v=[Console]::In.ReadToEnd(); ConvertTo-SecureString $v -AsPlainText -Force | ConvertFrom-SecureString"], { input: String(value), encoding: "utf8" });
+    if (r.status !== 0) throw new Error("암호화해서 저장하지 못했어요.");
+    const c = load(); save({ ...c, enc: { ...(c.enc || {}), [name]: r.stdout.trim() } });
+    return;
+  }
+  const c = load(); save({ ...c, plain: { ...(c.plain || {}), [name]: String(value) } });
+}
+function vaultGet(name) {
+  const os = platform();
+  if (os === "darwin") {
+    const r = spawnSync("security", ["find-generic-password", "-a", name, "-s", KC_SERVICE, "-w"], { encoding: "utf8" });
+    return r.status === 0 ? r.stdout.replace(/\n$/, "") : "";
+  }
+  if (os === "win32") {
+    const e = (load().enc || {})[name];
+    if (!e) return "";
+    const r = spawnSync("powershell", ["-NoProfile", "-Command", "$s=[Console]::In.ReadToEnd().Trim() | ConvertTo-SecureString; [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))"], { input: e, encoding: "utf8" });
+    return r.status === 0 ? r.stdout.replace(/\r?\n$/, "") : "";
+  }
+  return (load().plain || {})[name] || "";
+}
+function vaultDel(name) {
+  if (platform() === "darwin") spawnSync("security", ["delete-generic-password", "-a", name, "-s", KC_SERVICE], { encoding: "utf8" });
+}
+const vaultWhere = () => (platform() === "darwin" ? "맥 키체인" : platform() === "win32" ? "윈도우 암호화(DPAPI) 파일" : "내 계정만 읽는 파일(600)");
+
+// 클립보드에서 한 번만 읽는다. 지금 클립보드 값이 모양에 안 맞으면 waitSec 동안 새로 복사되기를 기다린다.
+// 읽은 뒤에는 바로 비운다. 값은 화면에 출력하지 않는다.
+function readClipboardRaw() {
   const os = platform();
   const cmd = os === "darwin" ? "pbpaste" : os === "win32" ? 'powershell -NoProfile -Command "Get-Clipboard"' : "xclip -selection clipboard -o 2>/dev/null || wl-paste";
-  const v = execSync(cmd, { encoding: "utf8" }).trim();
+  try { return execSync(cmd, { encoding: "utf8" }).trim(); } catch { return ""; }
+}
+function clearClipboard() {
+  const os = platform();
   try {
     if (os === "darwin") execSync("pbcopy < /dev/null");
     else if (os === "win32") execSync('powershell -NoProfile -Command "Set-Clipboard -Value $null"');
+    else execSync("xclip -selection clipboard < /dev/null 2>/dev/null || wl-copy --clear");
   } catch {}
+}
+async function clipboardSecret(test, waitSec = 90) {
+  const until = Date.now() + waitSec * 1000;
+  let v = readClipboardRaw().replace(/\s+/g, "");
+  while (!test(v) && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 1000));
+    v = readClipboardRaw().replace(/\s+/g, "");
+  }
+  clearClipboard();
+  if (!test(v)) throw new Error(`${waitSec}초 안에 맞는 값이 복사되지 않았어요. 복사 버튼을 누른 뒤 다시 실행해 주세요.`);
   return v;
 }
+
 const out = (o) => console.log(JSON.stringify(o, null, 2));
 const digits = (s) => String(s || "").replace(/\D/g, "");
 const mask = (n) => { const d = digits(n); return d.length > 7 ? `${d.slice(0, 3)}-****-${d.slice(-4)}` : d; };
@@ -63,8 +119,15 @@ async function api(c, method, path, body) {
   }
   return j;
 }
-function ready() {
+// 예전 판(평문 config.json)에 키가 있으면 금고로 옮기고 파일에서 지운다
+function migrate() {
   const c = load();
+  for (const k of ["apiKey", "apiSecret"]) if (c[k]) { vaultSet(k, c[k]); delete c[k]; save(c); }
+  return load();
+}
+function creds() { const c = migrate(); return { ...c, apiKey: vaultGet("apiKey"), apiSecret: vaultGet("apiSecret") }; }
+function ready() {
+  const c = creds();
   if (!c.apiKey || !c.apiSecret) throw new Error("아직 연결되지 않았어요. 'key --from-clipboard'와 'secret --from-clipboard'를 먼저 해 주세요.");
   return c;
 }
@@ -83,25 +146,24 @@ const [cmd, ...rest] = process.argv.slice(2);
 try {
   if (cmd === "key" || cmd === "secret") {
     if (!rest.includes("--from-clipboard")) throw new Error(`복사한 뒤 '${cmd} --from-clipboard'로 실행해 주세요. 채팅에 붙여 넣지 마세요.`);
-    const v = clipboard().replace(/\s+/g, "");
-    if (!/^[A-Za-z0-9]{10,64}$/.test(v)) throw new Error("클립보드 값이 키 모양이 아니에요. 솔라피 화면에서 다시 복사해 주세요.");
-    save({ ...load(), [cmd === "key" ? "apiKey" : "apiSecret"]: v });
-    out({ ok: true, saved: cmd === "key" ? "API Key" : "API Secret", next: cmd === "key" ? "secret --from-clipboard" : "status" });
+    const v = await clipboardSecret((x) => /^[A-Za-z0-9]{10,64}$/.test(x));
+    vaultSet(cmd === "key" ? "apiKey" : "apiSecret", v);
+    out({ ok: true, saved: cmd === "key" ? "API Key" : "API Secret", savedIn: vaultWhere(), next: cmd === "key" ? "secret --from-clipboard" : "status" });
   }
   else if (cmd === "status") {
-    const c = load();
+    const c = creds();
     if (!c.apiKey || !c.apiSecret) { out({ connected: false, has: { key: !!c.apiKey, secret: !!c.apiSecret } }); }
     else {
       const bal = await api(c, "GET", "/cash/v1/balance");
       const senders = await activeSenders(c);
-      out({ connected: true, balance: bal.balance ?? null, point: bal.point ?? null, senders: senders.map(mask), defaultFrom: c.from ? mask(c.from) : null });
+      out({ connected: true, savedIn: vaultWhere(), balance: bal.balance ?? null, point: bal.point ?? null, senders: senders.map(mask), defaultFrom: c.from ? mask(c.from) : null });
     }
   }
   else if (cmd === "senders") {
     const c = ready();
     const s = await activeSenders(c);
     // 발신번호가 하나뿐이면 기본값으로 기억한다
-    if (s.length === 1 && c.from !== s[0]) save({ ...c, from: s[0] });
+    if (s.length === 1 && c.from !== s[0]) save({ ...load(), from: s[0] });
     out({ active: s.map(mask), count: s.length });
   }
   else if (cmd === "send") {
@@ -142,8 +204,9 @@ try {
     out({ ok: true, project, secrets: [kName, sName], use: `함수에서 defineSecret("${kName}")·defineSecret("${sName}")로 읽어요` });
   }
   else if (cmd === "logout") {
+    vaultDel("apiKey"); vaultDel("apiSecret");
     if (existsSync(FILE)) rmSync(FILE);
-    out({ ok: true, removed: FILE });
+    out({ ok: true, removed: [vaultWhere(), FILE] });
   }
   else {
     console.log(`Solapi CLI for Yomates
