@@ -11,6 +11,7 @@
 //   node solapi.mjs senders                     발신번호 목록
 //   node solapi.mjs send --to 01012345678 [--from 발신번호] "내용"          미리보기만(실제 발송 안 함)
 //   node solapi.mjs send --to 01012345678 [--from 발신번호] "내용" --yes    실제 발송(돈이 듦)
+//   node solapi.mjs bulk --file 목록.csv [--yes]                           여러 명(CSV: 번호,내용)
 //   node solapi.mjs history [YYYY-MM-DD]        그날 보낸 문자(한국 시각)
 //   node solapi.mjs firebase-secrets --project <아이디> [--names SOLAPI_KEY,SOLAPI_SECRET]
 //        Firebase Secret Manager 에 키·시크릿을 넣는다(값은 표준입력으로만 넘김). Blaze 요금제가 필요하다.
@@ -182,6 +183,52 @@ try {
       out({ ok: true, to: mask(to), type: r.type || type, status: r.statusMessage || r.statusCode || "accepted", messageId: r.messageId || null });
     }
   }
+  else if (cmd === "bulk") {
+    // 여러 명에게 보내기: CSV(번호,내용) 또는 JSON [{to,text}]. --yes 없으면 미리보기만
+    const c = ready();
+    const file = flag(rest, "--file");
+    if (!file || !existsSync(file)) throw new Error('사용법: bulk --file 목록.csv [--from 발신번호] [--yes]  (CSV 한 줄: 번호,내용)');
+    const raw = readFileSync(file, "utf8").replace(/^﻿/, "");
+    let rows;
+    if (/\.json$/i.test(file)) rows = JSON.parse(raw).map((x) => [x.to, x.text]);
+    else {
+      rows = [];
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const cells = []; let cur = "", q = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (q) { if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch; }
+          else if (ch === '"') q = true; else if (ch === ",") { cells.push(cur); cur = ""; } else cur += ch;
+        }
+        cells.push(cur);
+        rows.push([cells[0], cells.slice(1).join(",")]);
+      }
+      if (rows.length && !/\d{9,}/.test(digits(rows[0][0]))) rows.shift(); // 머리줄
+    }
+    let from = digits(flag(rest, "--from")) || c.from;
+    if (!from) { const s = await activeSenders(c); if (s.length === 1) from = s[0]; }
+    if (!from) throw new Error("발신번호를 정해 주세요(--from). 'senders'로 쓸 수 있는 번호를 볼 수 있어요.");
+    const seen = new Set(), msgs = [], bad = [], dup = [];
+    for (const [t, text] of rows) {
+      const to = digits(t);
+      if (!/^01\d{8,9}$/.test(to) || !String(text || "").trim()) { bad.push(mask(t) || String(t)); continue; }
+      if (seen.has(to)) { dup.push(mask(to)); continue; }
+      seen.add(to); msgs.push({ to, from, text: String(text).replace(/\\n/g, "\n") });
+    }
+    const typeOf = (t) => ([...t].reduce((n, ch) => n + (ch.charCodeAt(0) > 127 ? 2 : 1), 0) > 90 ? "LMS" : "SMS");
+    const types = msgs.reduce((o, m) => (o[typeOf(m.text)] = (o[typeOf(m.text)] || 0) + 1, o), {});
+    const h = new Date(Date.now() + KST).getUTCHours();
+    const night = h >= 21 || h < 8;
+    if (!rest.includes("--yes")) {
+      out({ preview: true, count: msgs.length, types, skippedBad: bad, skippedDuplicate: dup, from: mask(from), sample: msgs.slice(0, 3).map((m) => ({ to: mask(m.to), text: m.text })), warning: night ? "지금은 밤 9시~아침 8시예요. 광고 문자는 보내면 안 되고, 안내 문자도 급한 게 아니면 아침에 보내요." : null, next: "같은 명령 끝에 --yes 를 붙이면 실제로 보내요(요금이 들어요)." });
+    } else {
+      if (!msgs.length) throw new Error("보낼 번호가 없어요.");
+      const r = await api(c, "POST", "/messages/v4/send-many/detail", { messages: msgs });
+      const failed = (r.failedMessageList || []).map((x) => ({ to: mask(x.to), reason: x.statusMessage || x.statusCode }));
+      out({ ok: true, requested: msgs.length, failed: failed.length, failedList: failed, groupId: (r.groupInfo && r.groupInfo._id) || null, skippedBad: bad, skippedDuplicate: dup });
+    }
+  }
   else if (cmd === "history") {
     const c = ready();
     const d = rest[0] && /^\d{4}-\d{2}-\d{2}$/.test(rest[0]) ? rest[0] : new Date(Date.now() + KST).toISOString().slice(0, 10);
@@ -214,6 +261,7 @@ try {
   status                                           연결 · 잔액 · 발신번호
   senders                                          발신번호 목록
   send --to 번호 [--from 번호] "내용" [--yes]       --yes 없으면 미리보기
+  bulk --file 목록.csv [--from 번호] [--yes]          여러 명(CSV 한 줄: 번호,내용)
   history [YYYY-MM-DD]
   firebase-secrets --project <아이디>
   logout`);

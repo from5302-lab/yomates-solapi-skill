@@ -124,11 +124,15 @@ CLI는 `~/yomates-solapi/solapi.mjs` 하나다. Node.js 18 이상이면 따로 �
 | 연결·잔액·발신번호 | `node ~/yomates-solapi/solapi.mjs status` |
 | 문자 미리보기 | `node ~/yomates-solapi/solapi.mjs send --to 번호 "내용"` |
 | 실제 발송(확인 후) | 위 명령 끝에 `--yes` |
+| 여러 명 미리보기 | `node ~/yomates-solapi/solapi.mjs bulk --file 목록.csv` |
+| 여러 명 실제 발송(확인 후) | 위 명령 끝에 `--yes` |
 | 오늘 보낸 문자 | `node ~/yomates-solapi/solapi.mjs history` |
 | 특정 날짜 | `node ~/yomates-solapi/solapi.mjs history 2026-10-24` |
 
 - 90바이트(한글 약 45자)를 넘으면 장문(LMS)이 되고 요금이 올라간다. 미리보기에 `type`과 `bytes`가 나온다.
 - 번호는 화면에 `010-****-1234`처럼 가려서 보여 준다.
+- `bulk` 목록은 CSV 한 줄에 `번호,내용`이다. 내용에 쉼표가 있으면 큰따옴표로 감싸고, 줄바꿈은 `\n`으로 쓴다. 머리줄은 있어도 된다. 휴대폰 번호(01로 시작)가 아니거나 내용이 빈 줄, 겹친 번호는 빼고 미리보기에 따로 보여 준다. 밤 9시~아침 8시에는 미리보기에 경고가 뜬다.
+- 목록 파일에는 학생 연락처가 들어 있으니 보낸 뒤 바로 지운다.
 
 ## 막힐 때
 
