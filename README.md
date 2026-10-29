@@ -1,5 +1,9 @@
 # yomates-solapi-skill
 
+<!-- yomates-install:readme -->
+> **먼저 요메이트(Yomates)가 필요해요.** 이 스킬은 요메이트 앱 안에서 돌아가요. 아직 설치하지 않았다면 [YOMATES-INSTALL.md](YOMATES-INSTALL.md) 순서대로 설치한 뒤 돌아오세요. 공식 다운로드는 https://yomates.ai 하나뿐이에요.
+<!-- /yomates-install:readme -->
+
 요메이트(Yomates)에서 솔라피(SOLAPI) 문자 발송을 연결하는 스킬과 CLI예요. 학원 쌤들이 쓰도록 만들었어요.
 
 ## 쓰는 법
